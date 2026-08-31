@@ -629,7 +629,7 @@ static int qmc_init_state(const char *ekey, QMCState **out_state)
  */
 static void qmc_decrypt(QMCState *state, uint8_t *buffer, int64_t offset, int length)
 {
-    if (!state || length <= 0)
+    if (!state || length <= 0 || offset < 0)
         return;
 
     size_t off = (size_t)offset;
@@ -718,9 +718,7 @@ static int qmc_open(URLContext *h, const char *uri, int flags, AVDictionary **op
     ret = qmc_init_state(c->ekey, &c->state);
     if (ret < 0) {
         av_log(h, AV_LOG_ERROR, "Failed to initialize QMC decryption state\n");
-        qmc_free_state(c->state);
-        c->state = NULL;
-        return ret;
+        goto err;
     }
 
     /* 打开嵌套协议（自动识别 file/http 等） */
@@ -729,10 +727,9 @@ static int qmc_open(URLContext *h, const char *uri, int flags, AVDictionary **op
                                h->protocol_whitelist, h->protocol_blacklist, h);
     if (ret < 0) {
         av_log(h, AV_LOG_ERROR, "Unable to open nested URL '%s'\n", nested_url);
-        qmc_free_state(c->state);
-        c->state = NULL;
-        return ret;
+        goto err;
     }
+
     /* 初始化内部位置 */
     c->position = 0;
 
@@ -741,6 +738,11 @@ static int qmc_open(URLContext *h, const char *uri, int flags, AVDictionary **op
         h->is_streamed = 1;
 
     return 0;
+
+err:
+    qmc_free_state(c->state);
+    c->state = NULL;
+    return ret;
 }
 
 /**
@@ -770,16 +772,16 @@ static int64_t qmc_seek(URLContext *h, int64_t pos, int whence)
     QMCContext *c = h->priv_data;
     int64_t ret;
 
-    if (whence == AVSEEK_SIZE) {
-        // 查询文件大小，不需要更新位置
+    /* 查询文件大小：直接透传，不改变当前读写位置 */
+    if (whence == AVSEEK_SIZE)
         return ffurl_seek(c->inner, pos, AVSEEK_SIZE);
-    }
 
+    /* 其他 seek 方式：透传给底层，成功后更新内部位置为返回的绝对偏移 */
     ret = ffurl_seek(c->inner, pos, whence);
     if (ret < 0)
         return ret;
 
-    c->position = ret;   // 更新解密位置为新的绝对偏移
+    c->position = ret;
     return ret;
 }
 
@@ -792,9 +794,10 @@ static int qmc_close(URLContext *h)
     int ret = ffurl_closep(&c->inner);
     if (ret < 0)
         av_log(h, AV_LOG_WARNING, "Error closing inner URL\n");
+
     qmc_free_state(c->state);
     c->state = NULL;
-    return 0;
+    return ret; /* 返回底层关闭的错误码（可能为负），由调用者决定是否处理 */
 }
 
 /* 定义 URLProtocol 结构体 */
