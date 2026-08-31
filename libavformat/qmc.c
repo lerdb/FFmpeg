@@ -668,6 +668,7 @@ typedef struct QMCContext {
     const AVClass *class;
     URLContext *inner;          /* 底层协议上下文 */
     char *ekey;                 /* 用户提供的 Base64 密钥 */
+    int64_t position;           /* 当前文件偏移（用于解密） */
     QMCState *state;            /* 解密状态 */
 } QMCContext;
 
@@ -713,9 +714,12 @@ static int qmc_open(URLContext *h, const char *uri, int flags, AVDictionary **op
     }
 
     /* 初始化解密状态 */
+    c->state = NULL;
     ret = qmc_init_state(c->ekey, &c->state);
     if (ret < 0) {
         av_log(h, AV_LOG_ERROR, "Failed to initialize QMC decryption state\n");
+        qmc_free_state(c->state);
+        c->state = NULL;
         return ret;
     }
 
@@ -729,6 +733,8 @@ static int qmc_open(URLContext *h, const char *uri, int flags, AVDictionary **op
         c->state = NULL;
         return ret;
     }
+    /* 初始化内部位置 */
+    c->position = 0;
 
     /* 如果底层是流式，则本协议也标记为流式 */
     if (c->inner->is_streamed)
@@ -745,18 +751,14 @@ static int qmc_read(URLContext *h, uint8_t *buf, int size)
     QMCContext *c = h->priv_data;
     int ret;
 
-    /* 获取底层当前位置作为解密偏移 */
-    int64_t offset = ffurl_seek(c->inner, 0, SEEK_CUR);
-    if (offset < 0) {
-        av_log(h, AV_LOG_ERROR, "[QMC] Failed to get current position\n");
-        return AVERROR(EINVAL);
-    }
-
+    /* 直接读取，解密偏移使用当前 position */
     ret = ffurl_read(c->inner, buf, size);
     if (ret <= 0)
         return ret;
 
-    qmc_decrypt(c->state, buf, offset, ret);
+    qmc_decrypt(c->state, buf, c->position, ret);
+    c->position += ret;   /* 更新位置 */
+
     return ret;
 }
 
@@ -766,7 +768,19 @@ static int qmc_read(URLContext *h, uint8_t *buf, int size)
 static int64_t qmc_seek(URLContext *h, int64_t pos, int whence)
 {
     QMCContext *c = h->priv_data;
-    return ffurl_seek(c->inner, pos, whence);
+    int64_t ret;
+
+    if (whence == AVSEEK_SIZE) {
+        // 查询文件大小，不需要更新位置
+        return ffurl_seek(c->inner, pos, AVSEEK_SIZE);
+    }
+
+    ret = ffurl_seek(c->inner, pos, whence);
+    if (ret < 0)
+        return ret;
+
+    c->position = ret;   // 更新解密位置为新的绝对偏移
+    return ret;
 }
 
 /**
@@ -775,7 +789,9 @@ static int64_t qmc_seek(URLContext *h, int64_t pos, int whence)
 static int qmc_close(URLContext *h)
 {
     QMCContext *c = h->priv_data;
-    ffurl_closep(&c->inner);
+    int ret = ffurl_closep(&c->inner);
+    if (ret < 0)
+        av_log(h, AV_LOG_WARNING, "Error closing inner URL\n");
     qmc_free_state(c->state);
     c->state = NULL;
     return 0;
