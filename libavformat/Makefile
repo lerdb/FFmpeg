@@ -706,6 +706,7 @@ OBJS-$(CONFIG_MMSH_PROTOCOL)             += mmsh.o mms.o asf_tags.o
 OBJS-$(CONFIG_MMST_PROTOCOL)             += mmst.o mms.o asf_tags.o
 OBJS-$(CONFIG_PIPE_PROTOCOL)             += file.o
 OBJS-$(CONFIG_PROMPEG_PROTOCOL)          += prompeg.o
+OBJS-$(CONFIG_QMC_PROTOCOL)              += qmc.o
 OBJS-$(CONFIG_RTMP_PROTOCOL)             += rtmpproto.o rtmpdigest.o rtmppkt.o
 OBJS-$(CONFIG_RTMPE_PROTOCOL)            += rtmpproto.o rtmpdigest.o rtmppkt.o
 OBJS-$(CONFIG_RTMPS_PROTOCOL)            += rtmpproto.o rtmpdigest.o rtmppkt.o
