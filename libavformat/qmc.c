@@ -31,36 +31,37 @@
 #include "url.h"
 
 /* --------------------------------------------------------------------------
- * QMC 解密算法实现
+ * QMC 加密/解密协议实现
  *
- * 本文件将 QMC 解密算法（密钥派生 + 数据解密）封装为 FFmpeg 的 URL 协议。
- * 协议名为 "qmc"，使用 "qmc+" 前缀后接嵌套 URL。
+ * 本文件将 QMC 对称加解密算法封装为 FFmpeg 的 URL 协议。
+ * 协议名为 "qmc"，使用 "qmc+" 或 "qmc:" 前缀后接嵌套 URL。
  * 用户通过 -ekey 选项传递 Base64 编码的密钥字符串。
+ * 算法对称，读取时解密，写入时加密，使用相同的处理函数。
  *
  * 算法流程：
  *   1. 对用户提供的密钥进行 Base64 解码；
  *   2. 根据是否包含 "QQMusic EncV2,Key:" 前缀选择 V1 或 V2 派生流程；
- *   3. 派生得到实际解密密钥（通常为 512 字节，用于 RC4 变种，或更短用于 Map 或 Static 模式）；
- *   4. 根据密钥长度选择解密器类型：
+ *   3. 派生得到实际密钥（通常为 512 字节，用于 RC4 变种，或更短用于 Map 或 Static 模式）；
+ *   4. 根据密钥长度选择算法类型：
  *        - >300 字节：RC4 变种
  *        - 1~300 字节：Map 模式
  *        - 0 字节：Static 模式
- *   5. 每次读取时，根据当前文件偏移量对数据块进行解密。
+ *   5. 每次读取/写入时，根据当前文件偏移量对数据块进行解密/加密。
  * -------------------------------------------------------------------------- */
 
-/* 解密器类型 */
+/* 算法类型 */
 typedef enum QMCCipherType {
     QMC_CIPHER_STATIC = 0,
     QMC_CIPHER_MAP,
     QMC_CIPHER_RC4,
 } QMCCipherType;
 
-/* 解密状态结构体，保存初始化后的密钥和上下文 */
+/* 加解密状态结构体，保存初始化后的密钥和上下文 */
 typedef struct QMCState {
-    QMCCipherType type;             /* 解密器类型 */
+    QMCCipherType type;             /* 算法类型 */
 
     /* Map 模式数据 */
-    uint8_t *map_key;               /* Map 解密使用的密钥 */
+    uint8_t *map_key;               /* Map 使用的密钥 */
     size_t map_key_size;            /* 密钥长度 */
 
     /* RC4 模式数据 */
@@ -294,7 +295,6 @@ static int derive_key_v2(const uint8_t *raw, size_t raw_len,
     memcpy(str, buf2, buf2_len);
     str[buf2_len] = '\0';
 
-    /* 使用 FFmpeg 自带 Base64 解码 */
     int decoded_size = AV_BASE64_DECODE_SIZE(strlen(str));
     uint8_t *decoded = av_malloc(decoded_size);
     if (!decoded) {
@@ -333,7 +333,6 @@ static int derive_key(const char *raw_key, uint8_t **out_key, size_t *out_len)
     int ret = 0;
     size_t raw_len = 0;
 
-    /* 使用 FFmpeg 自带 Base64 解码 */
     int raw_dec_size = AV_BASE64_DECODE_SIZE(strlen(raw_key));
     uint8_t *raw_key_dec = av_malloc(raw_dec_size);
     if (!raw_key_dec)
@@ -372,7 +371,7 @@ fail:
 /* ---------------- Map Cipher ---------------- */
 
 /**
- * 位旋转辅助函数（与参考实现一致）
+ * 位旋转辅助函数
  */
 static uint8_t rotate_left(uint8_t value, uint8_t bits)
 {
@@ -392,9 +391,9 @@ static uint8_t map_get_mask(QMCState *state, size_t offset)
 }
 
 /**
- * Map 模式解密
+ * Map 模式加/解密（对称 XOR）
  */
-static void map_decrypt(QMCState *state, uint8_t *buf, size_t size, size_t offset)
+static void map_crypt(QMCState *state, uint8_t *buf, size_t size, size_t offset)
 {
     for (size_t i = 0; i < size; i++)
         buf[i] ^= map_get_mask(state, offset + i);
@@ -450,9 +449,9 @@ static uint8_t static_get_mask(size_t offset)
 }
 
 /**
- * 静态模式解密
+ * 静态模式加/解密（对称 XOR）
  */
-static void static_decrypt(uint8_t *buf, size_t size, size_t offset)
+static void static_crypt(uint8_t *buf, size_t size, size_t offset)
 {
     for (size_t i = 0; i < size; i++)
         buf[i] ^= static_get_mask(offset + i);
@@ -474,9 +473,9 @@ static size_t rc4_get_segment_skip(QMCState *state, size_t id)
 }
 
 /**
- * 解密首段（特殊处理：直接用密钥异或）
+ * 处理首段（直接用密钥异或）
  */
-static void rc4_enc_first_segment(QMCState *state, uint8_t *buf, size_t size, size_t offset)
+static void rc4_crypt_first_segment(QMCState *state, uint8_t *buf, size_t size, size_t offset)
 {
     for (size_t i = 0; i < size; i++) {
         size_t skip_idx = rc4_get_segment_skip(state, offset + i);
@@ -486,9 +485,9 @@ static void rc4_enc_first_segment(QMCState *state, uint8_t *buf, size_t size, si
 }
 
 /**
- * 解密普通段（使用变种 RC4 流）
+ * 处理普通段（变种 RC4 流）
  */
-static void rc4_enc_segment(QMCState *state, uint8_t *buf, size_t size, size_t offset)
+static void rc4_crypt_segment(QMCState *state, uint8_t *buf, size_t size, size_t offset)
 {
     uint8_t cbox[512];
     memcpy(cbox, state->rc4_box, sizeof(cbox));
@@ -508,13 +507,13 @@ static void rc4_enc_segment(QMCState *state, uint8_t *buf, size_t size, size_t o
 }
 
 /**
- * RC4 解密主函数（处理段边界）
- * @param state  解密状态
- * @param buf    数据缓冲区（原地解密）
+ * RC4 加/解密主函数（处理段边界）
+ * @param state  加解密状态
+ * @param buf    数据缓冲区
  * @param size   数据长度
  * @param offset 全局偏移
  */
-static void rc4_decrypt(QMCState *state, uint8_t *buf, size_t size, size_t offset)
+static void rc4_crypt(QMCState *state, uint8_t *buf, size_t size, size_t offset)
 {
     size_t to_process = size;
     size_t processed = 0;
@@ -523,7 +522,7 @@ static void rc4_decrypt(QMCState *state, uint8_t *buf, size_t size, size_t offse
         if (offset < state->rc4_first_segment_size) {
             size_t block_size = FFMIN(to_process,
                                       state->rc4_first_segment_size - offset);
-            rc4_enc_first_segment(state, buf + processed, block_size, offset);
+            rc4_crypt_first_segment(state, buf + processed, block_size, offset);
             offset += block_size;
             processed += block_size;
             to_process -= block_size;
@@ -534,19 +533,19 @@ static void rc4_decrypt(QMCState *state, uint8_t *buf, size_t size, size_t offse
         size_t current_seg_remaining = state->rc4_segment_size -
                                        (offset % state->rc4_segment_size);
         size_t block_size = FFMIN(to_process, current_seg_remaining);
-        rc4_enc_segment(state, buf + processed, block_size, offset);
+        rc4_crypt_segment(state, buf + processed, block_size, offset);
         offset += block_size;
         processed += block_size;
         to_process -= block_size;
     }
 }
 
-/* ---------------- 初始化与解密入口 ---------------- */
+/* ---------------- 初始化与加解密入口 ---------------- */
 
 /**
- * 根据用户提供的密钥初始化解密状态
+ * 根据用户提供的密钥初始化加解密状态
  * @param ekey      Base64 密钥字符串
- * @param out_state 输出解密状态指针
+ * @param out_state 输出加解密状态指针
  * @return 0 成功，负值失败
  */
 static int qmc_init_state(const char *ekey, QMCState **out_state)
@@ -621,13 +620,13 @@ static int qmc_init_state(const char *ekey, QMCState **out_state)
 }
 
 /**
- * 解密数据块（根据状态中的类型分派）
- * @param state  解密状态
- * @param buffer 数据缓冲区
+ * 加/解密数据块（对称操作）
+ * @param state  加解密状态
+ * @param buffer 数据缓冲区（原地变换）
  * @param offset 缓冲区首字节在文件中的绝对偏移量
  * @param length 数据长度
  */
-static void qmc_decrypt(QMCState *state, uint8_t *buffer, int64_t offset, int length)
+static void qmc_crypt(QMCState *state, uint8_t *buffer, int64_t offset, int length)
 {
     if (!state || length <= 0 || offset < 0)
         return;
@@ -635,13 +634,13 @@ static void qmc_decrypt(QMCState *state, uint8_t *buffer, int64_t offset, int le
     size_t off = (size_t)offset;
     switch (state->type) {
     case QMC_CIPHER_STATIC:
-        static_decrypt(buffer, length, off);
+        static_crypt(buffer, length, off);
         break;
     case QMC_CIPHER_MAP:
-        map_decrypt(state, buffer, length, off);
+        map_crypt(state, buffer, length, off);
         break;
     case QMC_CIPHER_RC4:
-        rc4_decrypt(state, buffer, length, off);
+        rc4_crypt(state, buffer, length, off);
         break;
     default:
         break;
@@ -649,7 +648,7 @@ static void qmc_decrypt(QMCState *state, uint8_t *buffer, int64_t offset, int le
 }
 
 /**
- * 释放解密状态
+ * 释放加解密状态
  */
 static void qmc_free_state(QMCState *state)
 {
@@ -668,15 +667,17 @@ typedef struct QMCContext {
     const AVClass *class;
     URLContext *inner;          /* 底层协议上下文 */
     char *ekey;                 /* 用户提供的 Base64 密钥 */
-    int64_t position;           /* 当前文件偏移（用于解密） */
-    QMCState *state;            /* 解密状态 */
+    int64_t position;           /* 当前文件偏移（用于加解密） */
+    QMCState *state;            /* 加解密状态 */
+    uint8_t *write_buf;         /* 写操作临时缓冲区 */
+    int write_buf_size;         /* 缓冲区大小 */
 } QMCContext;
 
 /* 命令行选项定义 */
 #define OFFSET(x) offsetof(QMCContext, x)
 #define D AV_OPT_FLAG_DECODING_PARAM
 static const AVOption options[] = {
-    { "ekey", "set QMC decryption key (base64 encoded)", OFFSET(ekey), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, D },
+    { "ekey", "set QMC encryption/decryption key (base64 encoded)", OFFSET(ekey), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, D },
     { NULL }
 };
 
@@ -688,7 +689,7 @@ static const AVClass qmc_class = {
 };
 
 /**
- * 打开协议：检查 URL 前缀，初始化密钥并打开底层协议
+ * 打开协议
  */
 static int qmc_open(URLContext *h, const char *uri, int flags, AVDictionary **options)
 {
@@ -709,15 +710,15 @@ static int qmc_open(URLContext *h, const char *uri, int flags, AVDictionary **op
 
     /* 检查密钥是否提供 */
     if (!c->ekey || !c->ekey[0]) {
-        av_log(h, AV_LOG_ERROR, "No decryption key provided (use -ekey)\n");
+        av_log(h, AV_LOG_ERROR, "No encryption/decryption key provided (use -ekey)\n");
         return AVERROR(EINVAL);
     }
 
-    /* 初始化解密状态 */
+    /* 初始化加解密状态 */
     c->state = NULL;
     ret = qmc_init_state(c->ekey, &c->state);
     if (ret < 0) {
-        av_log(h, AV_LOG_ERROR, "Failed to initialize QMC decryption state\n");
+        av_log(h, AV_LOG_ERROR, "Failed to initialize QMC state\n");
         goto err;
     }
 
@@ -758,9 +759,47 @@ static int qmc_read(URLContext *h, uint8_t *buf, int size)
     if (ret <= 0)
         return ret;
 
-    qmc_decrypt(c->state, buf, c->position, ret);
+    /* 解密 */
+    qmc_crypt(c->state, buf, c->position, ret);
     c->position += ret;   /* 更新位置 */
 
+    return ret;
+}
+
+/**
+ * 写入并加密（使用内部缓冲区避免频繁分配）
+ */
+static int qmc_write(URLContext *h, const uint8_t *buf, int size)
+{
+    QMCContext *c = h->priv_data;
+    int ret;
+
+    if (!c->state)
+        return AVERROR(EINVAL);
+
+    /* 确保缓冲区足够大 */
+    av_fast_malloc(&c->write_buf, &c->write_buf_size, size);
+    if (!c->write_buf)
+        return AVERROR(ENOMEM);
+
+    /* 复制数据到可写缓冲区 */
+    memcpy(c->write_buf, buf, size);
+
+    /* 加密 */
+    qmc_crypt(c->state, c->write_buf, c->position, size);
+
+    /* 写入底层协议 */
+    ret = ffurl_write(c->inner, c->write_buf, size);
+    if (ret < 0)
+        return ret;
+
+    /* 处理部分写入：如果底层没有写完全部数据，则返回错误，避免状态不一致 */
+    if (ret != size) {
+        av_log(h, AV_LOG_ERROR, "Partial write not supported for encrypted stream\n");
+        return AVERROR(EIO);
+    }
+
+    c->position += ret;
     return ret;
 }
 
@@ -797,7 +836,11 @@ static int qmc_close(URLContext *h)
 
     qmc_free_state(c->state);
     c->state = NULL;
-    return ret; /* 返回底层关闭的错误码（可能为负），由调用者决定是否处理 */
+
+    av_freep(&c->write_buf);
+    c->write_buf_size = 0;
+
+    return ret;
 }
 
 /* 定义 URLProtocol 结构体 */
@@ -805,6 +848,7 @@ const URLProtocol ff_qmc_protocol = {
     .name                = "qmc",
     .url_open2           = qmc_open,
     .url_read            = qmc_read,
+    .url_write           = qmc_write,
     .url_seek            = qmc_seek,
     .url_close           = qmc_close,
     .priv_data_size      = sizeof(QMCContext),
