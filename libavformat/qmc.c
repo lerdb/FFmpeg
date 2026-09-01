@@ -98,7 +98,7 @@ static int qmc_open(URLContext *h, const char *uri, int flags, AVDictionary **op
 
     /* 初始化加解密状态 */
     c->state = NULL;
-    ret = qmc_init_state(c->ekey, &c->state);
+    ret = av_qmc_init_state(c->ekey, &c->state);
     if (ret < 0) {
         av_log(h, AV_LOG_ERROR, "Failed to initialize QMC state\n");
         goto err;
@@ -123,7 +123,7 @@ static int qmc_open(URLContext *h, const char *uri, int flags, AVDictionary **op
     return 0;
 
 err:
-    qmc_free_state(c->state);
+    av_qmc_free_state(c->state);
     c->state = NULL;
     return ret;
 }
@@ -150,7 +150,7 @@ static int qmc_read(URLContext *h, uint8_t *buf, int size)
         return ret;
 
     /* 解密 */
-    qmc_crypt(c->state, buf, c->position, ret);
+    av_qmc_crypt(c->state, buf, c->position, ret);
     c->position += ret;   /* 更新位置 */
 
     return ret;
@@ -184,7 +184,7 @@ static int qmc_write(URLContext *h, const uint8_t *buf, int size)
     memcpy(c->write_buf, buf, size);
 
     /* 加密 */
-    qmc_crypt(c->state, c->write_buf, c->position, size);
+    av_qmc_crypt(c->state, c->write_buf, c->position, size);
 
     /* 写入底层协议 */
     ret = ffurl_write(c->inner, c->write_buf, size);
@@ -245,7 +245,7 @@ static int qmc_close(URLContext *h)
     if (ret < 0)
         av_log(h, AV_LOG_WARNING, "Error closing inner URL\n");
 
-    qmc_free_state(c->state);
+    av_qmc_free_state(c->state);
     c->state = NULL;
 
     av_freep(&c->write_buf);

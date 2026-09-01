@@ -53,13 +53,13 @@ typedef struct QMCState QMCState;
  * @param ekey      Base64-encoded key string as provided by the user.
  * @param out_state Pointer to a location where the newly allocated QMCState
  *                  will be stored. Caller is responsible for freeing it with
- *                  qmc_free_state().
+ *                  av_qmc_free_state().
  * @return 0 on success, a negative AVERROR code on failure:
  *         - AVERROR(EINVAL) if input key is invalid or too short.
  *         - AVERROR(ENOMEM) if memory allocation fails.
  *         - AVERROR_INVALIDDATA if Base64 decoding or key derivation fails.
  */
-int qmc_init_state(const char *ekey, QMCState **out_state);
+int av_qmc_init_state(const char *ekey, QMCState **out_state);
 
 /**
  * Encrypt or decrypt a block of data in-place.
@@ -69,19 +69,19 @@ int qmc_init_state(const char *ekey, QMCState **out_state);
  * The `offset` parameter is crucial because the cipher is stream-oriented
  * and depends on the absolute byte position in the file.
  *
- * @param state  Initialized QMC context (from qmc_init_state()).
+ * @param state  Initialized QMC context (from av_qmc_init_state()).
  * @param buffer Pointer to the data to be transformed. Must not be NULL.
  * @param offset Absolute byte offset of the first byte in `buffer` within the
  *               file. Must be >= 0.
  * @param length Number of bytes to process. Must be > 0.
  */
-void qmc_crypt(QMCState *state, uint8_t *buffer, int64_t offset, int length);
+void av_qmc_crypt(QMCState *state, uint8_t *buffer, int64_t offset, int length);
 
 /**
  * Free a QMC cipher context and all associated resources.
  *
  * @param state Context to free. May be NULL (function does nothing).
  */
-void qmc_free_state(QMCState *state);
+void av_qmc_free_state(QMCState *state);
 
 #endif /* AVUTIL_QMC_H */

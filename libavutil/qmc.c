@@ -78,6 +78,9 @@ struct QMCState {
 
 /**
  * 从字节数组中读取大端 32 位整数
+ *
+ * 将连续的 4 个字节按照 big-endian 顺序组合成一个 32 位无符号整数。
+ *
  * @param p 指向至少 4 字节的数据
  * @return 读取到的 32 位无符号整数（大端序）
  */
@@ -89,6 +92,9 @@ static uint32_t load_be32(const uint8_t *p)
 
 /**
  * 将 32 位整数以大端序写入字节数组
+ *
+ * 将 32 位无符号整数拆分为 4 个字节，按 big-endian 顺序写入缓冲区。
+ *
  * @param p 指向至少 4 字节的缓冲区
  * @param v 要写入的 32 位无符号整数
  */
@@ -131,6 +137,9 @@ static void tea_decipher_block(uint8_t block[8], const uint8_t key[16])
 
 /**
  * 异或两个等长数据块
+ *
+ * 将两个缓冲区逐字节异或，结果存入 dst。三个缓冲区长度必须至少为 len。
+ *
  * @param dst 输出缓冲区，长度至少 len
  * @param a   第一个数据块
  * @param b   第二个数据块
@@ -642,7 +651,7 @@ static void rc4_crypt(QMCState *state, uint8_t *buf, size_t size, size_t offset)
  * @param out_state 输出加解密状态指针（调用者 av_free）
  * @return 0 成功，负值失败
  */
-int qmc_init_state(const char *ekey, QMCState **out_state)
+int av_qmc_init_state(const char *ekey, QMCState **out_state)
 {
     int ret;
     uint8_t *derived_key = NULL;
@@ -724,7 +733,7 @@ int qmc_init_state(const char *ekey, QMCState **out_state)
  * @param offset 缓冲区首字节在文件中的绝对偏移量
  * @param length 数据长度
  */
-void qmc_crypt(QMCState *state, uint8_t *buffer, int64_t offset, int length)
+void av_qmc_crypt(QMCState *state, uint8_t *buffer, int64_t offset, int length)
 {
     if (!state || length <= 0 || offset < 0)
         return;
@@ -750,7 +759,7 @@ void qmc_crypt(QMCState *state, uint8_t *buffer, int64_t offset, int length)
  *
  * @param state 要释放的状态指针（可为 NULL）
  */
-void qmc_free_state(QMCState *state)
+void av_qmc_free_state(QMCState *state)
 {
     if (state) {
         if (state->type == QMC_CIPHER_MAP)
